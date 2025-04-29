@@ -13,77 +13,82 @@ export default async function connectToPi(deviceIP, onFrame, onStatus) {
     ws.onopen = async () => {
       onStatus('WebSocket connected');
   
-      const offer = await pc.createOffer();
+      // 1) Create your DataChannel (browser is the offerer)
+      const dc = pc.createDataChannel('media');
+      dc.binaryType = 'arraybuffer';
+      dc.onopen = () => onStatus('Streaming…');
+      dc.onmessage = (evt) => {
+        const blob = new Blob([evt.data], { type: 'image/png' });
+        onFrame(URL.createObjectURL(blob));
+        setTimeout(() => URL.revokeObjectURL(URL.createObjectURL(blob)), 1000);
+      };
+  
+      // 2) Make the offer
+      const offer = await pc.createOffer({
+        offerToReceiveAudio: false,
+        offerToReceiveVideo: false
+      });
       await pc.setLocalDescription(offer);
-      ws.send(JSON.stringify({ type: 'offer', sdp: offer.sdp }));
-    };
   
-    pc.onicecandidate = (event) => {
-      if (event.candidate && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'ice-candidate', candidate: event.candidate }));
-      }
-    };
-  
-    ws.onmessage = async (msg) => {
-      const data = JSON.parse(msg.data);
-  
-      if (data.type === 'answer') {
-        try {
-          if (pc.signalingState === 'stable') {
-            console.warn('Skipping setRemoteDescription: already stable');
-            return;
-          }
-  
-          await pc.setRemoteDescription(
-            new RTCSessionDescription({
-              type: 'answer',
-              sdp: data.sdp
-            })
-          );
-  
-          // flush ICE candidates
-          for (const candidate of pendingCandidates) {
-            try {
-              await pc.addIceCandidate(candidate);
-            } catch (err) {
-              console.warn('Failed to apply buffered ICE candidate:', err);
-            }
-          }
-          pendingCandidates.length = 0;
-        } catch (err) {
-          console.error('Failed to set remote answer:', err);
-        }
-      }
-  
-      else if (data.type === 'ice-candidate') {
-        const candidate = new RTCIceCandidate(data.candidate);
-        if (pc.remoteDescription && pc.remoteDescription.type) {
-          try {
-            await pc.addIceCandidate(candidate);
-          } catch (err) {
-            console.warn('Failed to add ICE candidate:', err);
-          }
+      // 3) Wait for ICE gathering to finish so SDP has ice-ufrag/pwd
+      await new Promise(resolve => {
+        if (pc.iceGatheringState === 'complete') {
+          resolve();
         } else {
-          pendingCandidates.push(candidate); // queue for later
+          const check = () => {
+            if (pc.iceGatheringState === 'complete') {
+              pc.removeEventListener('icegatheringstatechange', check);
+              resolve();
+            }
+          };
+          pc.addEventListener('icegatheringstatechange', check);
         }
-      }
+      });
+  
+      // 4) Send the fully-populated SDP
+      ws.send(JSON.stringify({
+        type: 'offer',
+        sdp: pc.localDescription.sdp
+      }));
     };
   
     ws.onerror = () => onStatus('WebSocket error');
     ws.onclose = () => onStatus('Disconnected');
   
-    pc.ondatachannel = (event) => {
-      const dc = event.channel;
-      dc.binaryType = 'arraybuffer';
-      dc.onopen = () => onStatus('Streaming...');
-      dc.onmessage = (evt) => {
-        const blob = new Blob([evt.data], { type: 'image/png' }); // PNG or JPEG
-        const url = URL.createObjectURL(blob);
-        onFrame(url);
-        setTimeout(() => URL.revokeObjectURL(url), 1000);
-      };
+    // Send ICE candidates as they come
+    pc.onicecandidate = (evt) => {
+      if (evt.candidate && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'ice-candidate', candidate: evt.candidate }));
+      }
     };
   
+    // Handle answer + remote ICE
+    ws.onmessage = async (evt) => {
+      const data = JSON.parse(evt.data);
+      if (data.type === 'answer') {
+        if (pc.signalingState !== 'stable') {
+          await pc.setRemoteDescription(
+            new RTCSessionDescription({ type: 'answer', sdp: data.sdp })
+          );
+          // flush queued candidates
+          for (const c of pendingCandidates) {
+            try { await pc.addIceCandidate(c); }
+            catch (e) { console.warn('ICE add error', e); }
+          }
+          pendingCandidates.length = 0;
+        }
+      } else if (data.type === 'ice-candidate') {
+        const c = new RTCIceCandidate(data.candidate);
+        if (pc.remoteDescription && pc.remoteDescription.type) {
+          try { await pc.addIceCandidate(c); }
+          catch (e) { console.warn('ICE add error', e); }
+        } else {
+          pendingCandidates.push(c);
+        }
+      }
+    };
+  
+    // Clean up
     return () => {
       pc.close();
       ws.close();
