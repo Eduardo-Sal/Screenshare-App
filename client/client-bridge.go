@@ -137,31 +137,32 @@ func main() {
 
 	// Once DataChannel is open, start sending screenshots
 	dc.OnOpen(func() {
-		log.Println("🔗 DataChannel 'media' open - capturing and streaming screenshots...")
+		log.Println("🔗 DataChannel 'media' open - streaming frames...")
 
 		for {
-			// Capture screenshot using scrot
-			err := exec.Command("scrot", "-q", "75", "/tmp/frame.jpg").Run()
-			if err != nil {
+			// Capture a screenshot
+			cmd := exec.Command("fbgrab", "/tmp/frame.png")
+			if err := cmd.Run(); err != nil {
 				log.Printf("Failed to capture screenshot: %v", err)
+				time.Sleep(time.Second)
 				continue
 			}
 
-			// Read screenshot file
-			frame, err := os.ReadFile("/tmp/frame.jpg")
+			// Open the screenshot
+			data, err := os.ReadFile("/tmp/frame.png")
 			if err != nil {
 				log.Printf("Failed to read screenshot: %v", err)
+				time.Sleep(time.Second)
 				continue
 			}
 
-			// Send over WebRTC DataChannel
-			if err := dc.Send(frame); err != nil {
+			// Send screenshot over DataChannel
+			if err := dc.Send(data); err != nil {
 				log.Printf("Error sending frame: %v", err)
 				return
 			}
 
-			// Pace frame rate
-			time.Sleep(1 * time.Second) // (you can change to 500ms later if you want)
+			time.Sleep(1 * time.Second) // adjust fps here (currently 1fps)
 		}
 	})
 
