@@ -1,66 +1,116 @@
-// server.go
-// Simple WebSocket signaling server for WebRTC offer/answer and ICE candidates.
-
+// server/server.go
 package main
 
 import (
+	"bytes"
+	"encoding/binary"
+	"fmt"
+	"image"
+	"image/color"
+	"image/jpeg"
+	"io"
 	"log"
+	"net"
 	"net/http"
-	"sync"
-
-	"github.com/gorilla/websocket"
+	"time"
 )
 
-var (
-	upgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
-	clients  = make(map[*websocket.Conn]bool)
-	mu       sync.Mutex
+const (
+	port    = "8080" // TCP port to listen on
+	fps     = 1      // Frames per second
+	imgW    = 640    // Width of dummy image
+	imgH    = 480    // Height of dummy image
+	quality = 80     // JPEG quality (0–100)
 )
 
-func handleWS(w http.ResponseWriter, r *http.Request) {
-	// Upgrade HTTP to WebSocket
-	ws, err := upgrader.Upgrade(w, r, nil)
+// getPublicIP queries a public service to discover the Pi's external IP.
+func getPublicIP() (string, error) {
+	resp, err := http.Get("https://api.ipify.org")
 	if err != nil {
-		log.Printf("WebSocket upgrade error: %v", err)
-		return
+		return "", fmt.Errorf("could not fetch public IP: %w", err)
 	}
-	defer ws.Close()
+	defer resp.Body.Close()
 
-	// Register new client
-	mu.Lock()
-	clients[ws] = true
-	mu.Unlock()
-	log.Printf("Client connected: %s", ws.RemoteAddr())
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("could not read IP response: %w", err)
+	}
+	return string(data), nil
+}
 
-	// Read & broadcast messages
-	for {
-		mt, msg, err := ws.ReadMessage()
+// generateDummyFrame creates a JPEG-encoded solid-color image.
+// The color cycles based on the current second for visual feedback.
+func generateDummyFrame() ([]byte, error) {
+	img := image.NewRGBA(image.Rect(0, 0, imgW, imgH))
+	sec := time.Now().Second()
+	col := color.RGBA{uint8(sec * 4), uint8(255 - sec*4), 128, 255}
+
+	for y := 0; y < imgH; y++ {
+		for x := 0; x < imgW; x++ {
+			img.Set(x, y, col)
+		}
+	}
+
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: quality}); err != nil {
+		return nil, fmt.Errorf("jpeg encode error: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
+// handleConnection streams dummy frames to a connected client.
+// Each frame is prefixed with a 4-byte big-endian length header.
+func handleConnection(conn net.Conn) {
+	defer conn.Close()
+	clientAddr := conn.RemoteAddr().String()
+	log.Printf("👥 Client connected: %s\n", clientAddr)
+
+	ticker := time.NewTicker(time.Second / time.Duration(fps))
+	defer ticker.Stop()
+
+	for range ticker.C {
+		frame, err := generateDummyFrame()
 		if err != nil {
-			break
+			log.Printf("Frame generation error: %v\n", err)
+			return
 		}
-		// Broadcast to all other clients
-		mu.Lock()
-		for c := range clients {
-			if c != ws {
-				c.WriteMessage(mt, msg)
-			}
+
+		// Write length prefix
+		if err := binary.Write(conn, binary.BigEndian, uint32(len(frame))); err != nil {
+			log.Printf("Error writing length to %s: %v\n", clientAddr, err)
+			return
 		}
-		mu.Unlock()
+
+		// Write JPEG data
+		if _, err := conn.Write(frame); err != nil {
+			log.Printf("Error sending frame to %s: %v\n", clientAddr, err)
+			return
+		}
 	}
 
-	// Clean up
-	mu.Lock()
-	delete(clients, ws)
-	mu.Unlock()
-	log.Printf("Client disconnected: %s", ws.RemoteAddr())
+	log.Printf("Client disconnected: %s\n", clientAddr)
 }
 
 func main() {
-	// Serve WebSocket endpoint
-	http.HandleFunc("/ws", handleWS)
-	addr := ":8000" // signalling server port
-	log.Printf("🚦 Signaling server listening on %s/ws", addr)
-	if err := http.ListenAndServe(addr, nil); err != nil {
-		log.Fatalf("Signaling server error: %v", err)
+	ip, err := getPublicIP()
+	if err != nil {
+		log.Fatalf("%v\n", err)
+	}
+	fmt.Printf("Raspberry Pi Streamer\n Public IP: %s:%s\n", ip, port)
+
+	ln, err := net.Listen("tcp", ":"+port)
+	if err != nil {
+		log.Fatalf("Could not start TCP listener: %v\n", err)
+	}
+	defer ln.Close()
+	log.Printf("Listening on port %s (WAN)\n", port)
+
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			log.Printf("Accept error: %v\n", err)
+			continue
+		}
+		go handleConnection(conn)
 	}
 }
