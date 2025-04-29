@@ -1,3 +1,4 @@
+// webrtc.connect.js
 export default async function connectToPi(deviceIP, onFrame, onStatus) {
     const pc = new RTCPeerConnection({
       iceServers: [
@@ -11,17 +12,6 @@ export default async function connectToPi(deviceIP, onFrame, onStatus) {
   
     ws.onopen = async () => {
       onStatus('WebSocket connected');
-  
-      const dc = pc.createDataChannel('media');
-      dc.binaryType = 'arraybuffer';
-  
-      dc.onopen = () => onStatus('Streaming...');
-      dc.onmessage = (evt) => {
-        const blob = new Blob([evt.data], { type: 'image/jpeg' });
-        const url = URL.createObjectURL(blob);
-        onFrame(url);
-        setTimeout(() => URL.revokeObjectURL(url), 1000);
-      };
   
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
@@ -43,14 +33,14 @@ export default async function connectToPi(deviceIP, onFrame, onStatus) {
             console.warn('Skipping setRemoteDescription: already stable');
             return;
           }
-      
+  
           await pc.setRemoteDescription(
             new RTCSessionDescription({
               type: 'answer',
               sdp: data.sdp
             })
           );
-      
+  
           // flush ICE candidates
           for (const candidate of pendingCandidates) {
             try {
@@ -74,8 +64,7 @@ export default async function connectToPi(deviceIP, onFrame, onStatus) {
             console.warn('Failed to add ICE candidate:', err);
           }
         } else {
-          // buffer ICE until remote desc is set
-          pendingCandidates.push(candidate);
+          pendingCandidates.push(candidate); // queue for later
         }
       }
     };
@@ -88,7 +77,7 @@ export default async function connectToPi(deviceIP, onFrame, onStatus) {
       dc.binaryType = 'arraybuffer';
       dc.onopen = () => onStatus('Streaming...');
       dc.onmessage = (evt) => {
-        const blob = new Blob([evt.data], { type: 'image/jpeg' });
+        const blob = new Blob([evt.data], { type: 'image/png' }); // PNG or JPEG
         const url = URL.createObjectURL(blob);
         onFrame(url);
         setTimeout(() => URL.revokeObjectURL(url), 1000);

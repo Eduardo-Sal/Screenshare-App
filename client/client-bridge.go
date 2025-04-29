@@ -98,13 +98,19 @@ func main() {
 				if err != nil {
 					log.Fatalf("CreateAnswer error: %v", err)
 				}
-				if err := peerConn.SetLocalDescription(answer); err != nil {
+				err = peerConn.SetLocalDescription(answer)
+				if err != nil {
 					log.Fatalf("SetLocalDescription error: %v", err)
 				}
-				safeWriteJSON(ws, map[string]interface{}{
-					"type": "answer",
-					"sdp":  answer.SDP,
-				})
+
+				// Wait for ICE gathering to complete before sending SDP
+				go func() {
+					<-webrtc.GatheringCompletePromise(peerConn)
+					safeWriteJSON(ws, map[string]interface{}{
+						"type": "answer",
+						"sdp":  peerConn.LocalDescription().SDP,
+					})
+				}()
 
 			case "answer":
 				log.Println("Received answer from peer")
