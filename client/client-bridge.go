@@ -1,12 +1,10 @@
 package main
 
 import (
-	"bufio"
-	"encoding/binary"
 	"flag"
-	"io"
 	"log"
-	"net"
+	"os"
+	"os/exec"
 	"sync"
 	"time"
 
@@ -16,7 +14,7 @@ import (
 
 // Flags
 var (
-	piAddr        = flag.String("addr", "", "Raspberry Pi streamer address (ip:port)")
+	piAddr        = flag.String("addr", "", "Raspberry Pi streamer address (ip:port)") // not used anymore
 	signalURL     = flag.String("signal", "ws://localhost:8000/ws", "WebSocket signaling server URL")
 	turnServerURL = flag.String("turn", "", "TURN server URL (e.g., turn:host:3478)")
 	turnUser      = flag.String("turn-user", "", "TURN username")
@@ -34,16 +32,6 @@ func safeWriteJSON(ws *websocket.Conn, v interface{}) error {
 
 func main() {
 	flag.Parse()
-	if *piAddr == "" {
-		log.Fatal("Missing -addr flag, e.g. -addr=192.168.1.10:8080")
-	}
-
-	// Connect to Pi TCP streamer
-	piConn, err := net.Dial("tcp", *piAddr)
-	if err != nil {
-		log.Fatalf("Could not connect to Pi streamer: %v", err)
-	}
-	log.Printf("Connected to Pi streamer at %s", *piAddr)
 
 	// Connect to signaling server
 	ws, _, err := websocket.DefaultDialer.Dial(*signalURL, nil)
@@ -147,27 +135,33 @@ func main() {
 		}
 	}()
 
-	// Once DataChannel is open, stream frames
+	// Once DataChannel is open, start sending screenshots
 	dc.OnOpen(func() {
-		log.Println("🔗 DataChannel 'media' open - streaming frames...")
-		reader := bufio.NewReader(piConn)
+		log.Println("🔗 DataChannel 'media' open - capturing and streaming screenshots...")
+
 		for {
-			var length uint32
-			if err := binary.Read(reader, binary.BigEndian, &length); err != nil {
-				if err == io.EOF {
-					log.Println("Pi streamer closed connection")
-				}
-				return
+			// Capture screenshot using scrot
+			err := exec.Command("scrot", "-q", "75", "/tmp/frame.jpg").Run()
+			if err != nil {
+				log.Printf("Failed to capture screenshot: %v", err)
+				continue
 			}
-			buf := make([]byte, length)
-			if _, err := io.ReadFull(reader, buf); err != nil {
-				log.Fatalf("Error reading frame data: %v", err)
+
+			// Read screenshot file
+			frame, err := os.ReadFile("/tmp/frame.jpg")
+			if err != nil {
+				log.Printf("Failed to read screenshot: %v", err)
+				continue
 			}
-			if err := dc.Send(buf); err != nil {
+
+			// Send over WebRTC DataChannel
+			if err := dc.Send(frame); err != nil {
 				log.Printf("Error sending frame: %v", err)
 				return
 			}
-			time.Sleep(time.Second) // 1 fps
+
+			// Pace frame rate
+			time.Sleep(1 * time.Second) // (you can change to 500ms later if you want)
 		}
 	})
 
