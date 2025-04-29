@@ -1,6 +1,3 @@
-// server.go
-// Simple WebSocket signaling server for WebRTC offer/answer and ICE candidates.
-
 package main
 
 import (
@@ -18,7 +15,6 @@ var (
 )
 
 func handleWS(w http.ResponseWriter, r *http.Request) {
-	// Upgrade HTTP to WebSocket
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("WebSocket upgrade error: %v", err)
@@ -26,19 +22,16 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 	defer ws.Close()
 
-	// Register new client
 	mu.Lock()
 	clients[ws] = true
 	mu.Unlock()
 	log.Printf("Client connected: %s", ws.RemoteAddr())
 
-	// Read & broadcast messages
 	for {
 		mt, msg, err := ws.ReadMessage()
 		if err != nil {
 			break
 		}
-		// Broadcast to all other clients
 		mu.Lock()
 		for c := range clients {
 			if c != ws {
@@ -48,7 +41,6 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 		mu.Unlock()
 	}
 
-	// Clean up
 	mu.Lock()
 	delete(clients, ws)
 	mu.Unlock()
@@ -56,11 +48,7 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	// Serve WebSocket endpoint
 	http.HandleFunc("/ws", handleWS)
-	addr := ":8000" // signalling server port
-	log.Printf("🚦 Signaling server listening on %s/ws", addr)
-	if err := http.ListenAndServe(addr, nil); err != nil {
-		log.Fatalf("Signaling server error: %v", err)
-	}
+	log.Println("Signaling server listening on :8000/ws")
+	log.Fatal(http.ListenAndServe(":8000", nil))
 }
