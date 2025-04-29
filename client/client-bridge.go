@@ -1,6 +1,3 @@
-// client-bridge.go
-// Raspberry Pi WebRTC client using pion/webrtc and WebSocket signaling.
-
 package main
 
 import (
@@ -10,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -25,20 +23,29 @@ var (
 	turnPass      = flag.String("turn-pass", "", "TURN password")
 )
 
+// Mutex for WebSocket writes
+var wsMu sync.Mutex
+
+func safeWriteJSON(ws *websocket.Conn, v interface{}) error {
+	wsMu.Lock()
+	defer wsMu.Unlock()
+	return ws.WriteJSON(v)
+}
+
 func main() {
 	flag.Parse()
 	if *piAddr == "" {
 		log.Fatal("Missing -addr flag, e.g. -addr=192.168.1.10:8080")
 	}
 
-	// 1) Connect to Pi TCP streamer
+	// Connect to Pi TCP streamer
 	piConn, err := net.Dial("tcp", *piAddr)
 	if err != nil {
 		log.Fatalf("Could not connect to Pi streamer: %v", err)
 	}
 	log.Printf("Connected to Pi streamer at %s", *piAddr)
 
-	// 2) Connect to signaling server
+	// Connect to signaling server
 	ws, _, err := websocket.DefaultDialer.Dial(*signalURL, nil)
 	if err != nil {
 		log.Fatalf("Could not connect to signaling server: %v", err)
@@ -46,10 +53,10 @@ func main() {
 	defer ws.Close()
 	log.Printf("Connected to signaling server at %s", *signalURL)
 
-	// 3) Prepare WebRTC configuration
+	// WebRTC config
 	config := webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{
-			{URLs: []string{"stun:stun.l.google.com:19302"}}, // public STUN
+			{URLs: []string{"stun:stun.l.google.com:19302"}},
 		},
 	}
 	if *turnServerURL != "" {
@@ -60,30 +67,29 @@ func main() {
 		})
 	}
 
-	// 4) Create PeerConnection
 	peerConn, err := webrtc.NewPeerConnection(config)
 	if err != nil {
 		log.Fatalf("Error creating PeerConnection: %v", err)
 	}
 
-	// 5) Create a reliable DataChannel for JPEG frames
+	// Create DataChannel for JPEG
 	dc, err := peerConn.CreateDataChannel("media", nil)
 	if err != nil {
 		log.Fatalf("Error creating DataChannel: %v", err)
 	}
 
-	// When new ICE candidate is found → send to signaling
+	// ICE candidates
 	peerConn.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c == nil {
 			return
 		}
-		ws.WriteJSON(map[string]interface{}{
+		safeWriteJSON(ws, map[string]interface{}{
 			"type":      "ice-candidate",
 			"candidate": c.ToJSON(),
 		})
 	})
 
-	// 6) Handle incoming signaling messages
+	// WebSocket signaling handler
 	go func() {
 		for {
 			var msg map[string]interface{}
@@ -93,7 +99,6 @@ func main() {
 			}
 			switch msg["type"] {
 			case "offer":
-				// Set remote description
 				offer := webrtc.SessionDescription{
 					Type: webrtc.SDPTypeOffer,
 					SDP:  msg["sdp"].(string),
@@ -101,8 +106,6 @@ func main() {
 				if err := peerConn.SetRemoteDescription(offer); err != nil {
 					log.Fatalf("SetRemoteDescription error: %v", err)
 				}
-
-				// Create and send answer
 				answer, err := peerConn.CreateAnswer(nil)
 				if err != nil {
 					log.Fatalf("CreateAnswer error: %v", err)
@@ -110,13 +113,12 @@ func main() {
 				if err := peerConn.SetLocalDescription(answer); err != nil {
 					log.Fatalf("SetLocalDescription error: %v", err)
 				}
-				ws.WriteJSON(map[string]interface{}{
+				safeWriteJSON(ws, map[string]interface{}{
 					"type": "answer",
 					"sdp":  answer.SDP,
 				})
 
 			case "answer":
-				// If, for some reason, Pi ever sends us an answer:
 				log.Println("Received answer from peer")
 				ans := webrtc.SessionDescription{
 					Type: webrtc.SDPTypeAnswer,
@@ -127,11 +129,9 @@ func main() {
 				}
 
 			case "ice-candidate":
-				// Parse and add ICE candidate
 				cand := msg["candidate"].(map[string]interface{})
 				sdpMid := cand["sdpMid"].(string)
 				sdpMLine := uint16(cand["sdpMLineIndex"].(float64))
-
 				ci := webrtc.ICECandidateInit{
 					Candidate:     cand["candidate"].(string),
 					SDPMid:        &sdpMid,
@@ -147,7 +147,7 @@ func main() {
 		}
 	}()
 
-	// 7) Once DataChannel is open, start bridging Pi frames
+	// Once DataChannel is open, stream frames
 	dc.OnOpen(func() {
 		log.Println("🔗 DataChannel 'media' open - streaming frames...")
 		reader := bufio.NewReader(piConn)
@@ -163,11 +163,13 @@ func main() {
 			if _, err := io.ReadFull(reader, buf); err != nil {
 				log.Fatalf("Error reading frame data: %v", err)
 			}
-			dc.Send(buf)
-			time.Sleep(time.Second) // match ~1 fps
+			if err := dc.Send(buf); err != nil {
+				log.Printf("Error sending frame: %v", err)
+				return
+			}
+			time.Sleep(time.Second) // 1 fps
 		}
 	})
 
-	// Block forever
 	select {}
 }
