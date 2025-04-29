@@ -1,0 +1,8 @@
+# Go stuff
+bin/
+*.exe
+*.out
+
+# Node/React stuff
+node_modules/
+build/
