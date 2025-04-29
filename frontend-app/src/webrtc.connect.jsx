@@ -18,16 +18,15 @@ export default async function connectToPi(deviceIP, onFrame, onStatus) {
       dc.binaryType = 'arraybuffer';
       dc.onopen = () => onStatus('Streaming…');
       dc.onmessage = (evt) => {
+        console.log('Frame received', evt.data.byteLength);  // 👈 confirm receiving frames
         const blob = new Blob([evt.data], { type: 'image/png' });
-        onFrame(URL.createObjectURL(blob));
+        const url = URL.createObjectURL(blob);
+        onFrame(url);
         setTimeout(() => URL.revokeObjectURL(URL.createObjectURL(blob)), 1000);
       };
   
       // 2) Make the offer
-      const offer = await pc.createOffer({
-        offerToReceiveAudio: false,
-        offerToReceiveVideo: false
-      });
+      const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
   
       // 3) Wait for ICE gathering to finish so SDP has ice-ufrag/pwd
@@ -46,11 +45,15 @@ export default async function connectToPi(deviceIP, onFrame, onStatus) {
       });
   
       // 4) Send the fully-populated SDP
-      ws.send(JSON.stringify({
-        type: 'offer',
-        sdp: pc.localDescription.sdp
-      }));
-    };
+      if (!pc.localDescription) {
+        console.error('Missing localDescription');
+      } else {
+        ws.send(JSON.stringify({
+          type: 'offer',
+          sdp: pc.localDescription.sdp
+        }));
+      }
+    }
   
     ws.onerror = () => onStatus('WebSocket error');
     ws.onclose = () => onStatus('Disconnected');
