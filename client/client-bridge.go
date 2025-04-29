@@ -1,3 +1,4 @@
+// client-bridge.go
 package main
 
 import (
@@ -12,7 +13,6 @@ import (
 	"github.com/pion/webrtc/v3"
 )
 
-// Flags
 var (
 	piAddr        = flag.String("addr", "", "Raspberry Pi streamer address (ip:port)") // not used anymore
 	signalURL     = flag.String("signal", "ws://localhost:8000/ws", "WebSocket signaling server URL")
@@ -21,7 +21,6 @@ var (
 	turnPass      = flag.String("turn-pass", "", "TURN password")
 )
 
-// Mutex for WebSocket writes
 var wsMu sync.Mutex
 
 func safeWriteJSON(ws *websocket.Conn, v interface{}) error {
@@ -33,7 +32,6 @@ func safeWriteJSON(ws *websocket.Conn, v interface{}) error {
 func main() {
 	flag.Parse()
 
-	// Connect to signaling server
 	ws, _, err := websocket.DefaultDialer.Dial(*signalURL, nil)
 	if err != nil {
 		log.Fatalf("Could not connect to signaling server: %v", err)
@@ -41,7 +39,6 @@ func main() {
 	defer ws.Close()
 	log.Printf("Connected to signaling server at %s", *signalURL)
 
-	// WebRTC config
 	config := webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{
 			{URLs: []string{"stun:stun.l.google.com:19302"}},
@@ -60,13 +57,6 @@ func main() {
 		log.Fatalf("Error creating PeerConnection: %v", err)
 	}
 
-	// Create DataChannel for JPEG
-	dc, err := peerConn.CreateDataChannel("media", nil)
-	if err != nil {
-		log.Fatalf("Error creating DataChannel: %v", err)
-	}
-
-	// ICE candidates
 	peerConn.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c == nil {
 			return
@@ -77,7 +67,35 @@ func main() {
 		})
 	})
 
-	// WebSocket signaling handler
+	peerConn.OnDataChannel(func(d *webrtc.DataChannel) {
+		log.Println("DataChannel created by remote peer:", d.Label())
+		d.OnOpen(func() {
+			log.Println("🔗 DataChannel 'media' open - streaming frames...")
+			for {
+				cmd := exec.Command("fbgrab", "/tmp/frame.png")
+				if err := cmd.Run(); err != nil {
+					log.Printf("Failed to capture screenshot: %v", err)
+					time.Sleep(time.Second)
+					continue
+				}
+
+				data, err := os.ReadFile("/tmp/frame.png")
+				if err != nil {
+					log.Printf("Failed to read screenshot: %v", err)
+					time.Sleep(time.Second)
+					continue
+				}
+
+				if err := d.Send(data); err != nil {
+					log.Printf("Error sending frame: %v", err)
+					return
+				}
+
+				time.Sleep(1 * time.Second) // 1 fps
+			}
+		})
+	})
+
 	go func() {
 		for {
 			var msg map[string]interface{}
@@ -98,12 +116,10 @@ func main() {
 				if err != nil {
 					log.Fatalf("CreateAnswer error: %v", err)
 				}
-				err = peerConn.SetLocalDescription(answer)
-				if err != nil {
+				if err := peerConn.SetLocalDescription(answer); err != nil {
 					log.Fatalf("SetLocalDescription error: %v", err)
 				}
 
-				// Wait for ICE gathering to complete before sending SDP
 				go func() {
 					<-webrtc.GatheringCompletePromise(peerConn)
 					safeWriteJSON(ws, map[string]interface{}{
@@ -113,15 +129,7 @@ func main() {
 				}()
 
 			case "answer":
-				log.Println("Received answer from peer")
-				ans := webrtc.SessionDescription{
-					Type: webrtc.SDPTypeAnswer,
-					SDP:  msg["sdp"].(string),
-				}
-				if err := peerConn.SetRemoteDescription(ans); err != nil {
-					log.Fatalf("SetRemoteDescription(answer) error: %v", err)
-				}
-
+				log.Println("Received unexpected answer")
 			case "ice-candidate":
 				cand := msg["candidate"].(map[string]interface{})
 				sdpMid := cand["sdpMid"].(string)
@@ -134,43 +142,11 @@ func main() {
 				if err := peerConn.AddICECandidate(ci); err != nil {
 					log.Printf("AddICECandidate error: %v", err)
 				}
-
 			default:
 				log.Printf("Unknown signal type: %v", msg["type"])
 			}
 		}
 	}()
-
-	// Once DataChannel is open, start sending screenshots
-	dc.OnOpen(func() {
-		log.Println("🔗 DataChannel 'media' open - streaming frames...")
-
-		for {
-			// Capture a screenshot
-			cmd := exec.Command("fbgrab", "/tmp/frame.png")
-			if err := cmd.Run(); err != nil {
-				log.Printf("Failed to capture screenshot: %v", err)
-				time.Sleep(time.Second)
-				continue
-			}
-
-			// Open the screenshot
-			data, err := os.ReadFile("/tmp/frame.png")
-			if err != nil {
-				log.Printf("Failed to read screenshot: %v", err)
-				time.Sleep(time.Second)
-				continue
-			}
-
-			// Send screenshot over DataChannel
-			if err := dc.Send(data); err != nil {
-				log.Printf("Error sending frame: %v", err)
-				return
-			}
-
-			time.Sleep(1 * time.Second) // adjust fps here (currently 1fps)
-		}
-	})
 
 	select {}
 }
